@@ -15,8 +15,8 @@ available domain links straight to the Namecheap checkout.
 - Next.js 16 (App Router, TypeScript, Turbopack)
 - Tailwind CSS v4
 - [`lucide-react`](https://lucide.dev) icons
-- [Vercel AI SDK](https://sdk.vercel.ai) (`ai` + `@ai-sdk/anthropic`) calling
-  Claude Sonnet 4.5 via `generateObject` with a Zod schema
+- [Vercel AI SDK](https://sdk.vercel.ai) (`ai` + `@ai-sdk/openai`) calling
+  OpenAI `gpt-4o-mini` via `generateObject` with a Zod schema
 - [Namecheap domains API](https://www.namecheap.com/support/api/methods/domains/check/)
   for real availability checks, parsed with `fast-xml-parser`
 - DNS fallback (`dns.promises.resolve4`) when Namecheap creds aren't set
@@ -28,7 +28,7 @@ available domain links straight to the Namecheap checkout.
 - Textarea for a business concept (up to 300 chars)
 - **Advanced Filters**: name style (one-word / two-word / portmanteau / any)
   and syllable count. TLDs are fixed defaults and not user-selectable.
-- `POST /api/generate` — asks Claude for up to 12 candidate names + rationales
+- `POST /api/generate` — asks OpenAI for up to 12 candidate names + rationales
 - `POST /api/check-domain` — batched Namecheap lookup for all six TLDs at once,
   with a 60s per-domain in-memory cache
 - Results render as **one card per name** with six colored availability pills
@@ -44,7 +44,7 @@ Requires Node 20.9+ (Next 16 minimum). This repo was developed on Node 22.
 ```bash
 npm install
 cp .env.example .env.local
-# edit .env.local and paste your ANTHROPIC_API_KEY
+# edit .env.local and paste your OPENAI_API_KEY
 npm run dev
 ```
 
@@ -54,7 +54,7 @@ Open http://localhost:3000.
 
 | Variable                          | Required? | Purpose                                                                 |
 |-----------------------------------|-----------|-------------------------------------------------------------------------|
-| `ANTHROPIC_API_KEY`               | **yes**   | Server-side Claude API key for `/api/generate`                          |
+| `OPENAI_API_KEY`                  | **yes**   | Server-side OpenAI API key for `/api/generate`                          |
 | `NAMECHEAP_API_USER`              | prod      | Namecheap API username (usually same as account login)                  |
 | `NAMECHEAP_API_KEY`               | prod      | Namecheap API key                                                       |
 | `NAMECHEAP_USERNAME`              | prod      | Namecheap account username                                              |
@@ -161,7 +161,7 @@ to reject a hostile request:
    dev.
 6. **Cloudflare Turnstile** — invisible captcha. Frontend obtains a
    short-lived token; backend verifies it with CF before calling
-   Anthropic.
+   OpenAI.
 7. **Global daily budget** — a Redis counter keyed by UTC day caps
    successful generations at `DAILY_GENERATION_LIMIT` (default 200).
    Exceeded ⇒ `503` with `Retry-After: 3600`. Tune via env var.
@@ -239,13 +239,13 @@ seconds so shortlist re-renders don't hammer the upstream.
 ## AI SDK
 
 `/api/generate` uses the [Vercel AI SDK](https://sdk.vercel.ai)
-(`ai` + `@ai-sdk/anthropic`) and calls `generateObject` with a Zod
-schema so Claude returns a structured payload directly — no manual JSON
+(`ai` + `@ai-sdk/openai`) and calls `generateObject` with a Zod
+schema so OpenAI returns a structured payload directly — no manual JSON
 parsing, no regex fallback. The schema caps the array length and each
 field's size, which doubles as a cost guard on the model output.
 
-`ANTHROPIC_API_KEY` is the only model-side env var; the AI SDK's
-Anthropic provider picks it up from the environment automatically and
+`OPENAI_API_KEY` is the only model-side env var; the AI SDK's
+OpenAI provider picks it up from the environment automatically and
 nothing client-side ever sees it.
 
 ## Caveats
@@ -255,11 +255,11 @@ nothing client-side ever sees it.
   reports registered-but-parked domains as available. See
   [Getting Namecheap API access](#getting-namecheap-api-access) for the
   production story and the Vercel egress caveat.
-- The Claude response is shape-enforced by the Vercel AI SDK's
+- The OpenAI response is shape-enforced by the Vercel AI SDK's
   `generateObject` + Zod — the provider returns a tool-call that matches
   the schema or the call fails, so there's no prose / markdown / JSON
   parsing to worry about.
-- Claude calls are rate-limited per IP and globally budgeted (see
+- OpenAI calls are rate-limited per IP and globally budgeted (see
   "Security posture" above). The response shape itself is bounded by
   the schema, so a runaway model can't blow the cost budget.
 - Shortlist is stored only in the user's browser; clearing site data wipes it.

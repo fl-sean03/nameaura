@@ -181,7 +181,7 @@ export async function POST(req: Request) {
   }
 
   /* 8) Model call via Vercel AI SDK ----------------------------------- */
-  // The AI SDK reads ANTHROPIC_API_KEY from env automatically. We still
+  // The AI SDK reads OPENAI_API_KEY from env automatically. We still
   // guard for a missing key so we surface the same vague 503 externally
   // while logging the specific cause to stderr.
   if (!process.env.OPENAI_API_KEY) {
