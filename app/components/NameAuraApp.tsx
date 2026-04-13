@@ -1,27 +1,28 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Rocket, Star } from "lucide-react";
 import { Button } from "./ui/Button";
 import { AdvancedFilters } from "./AdvancedFilters";
 import { NameCard, NameCardSkeleton } from "./NameCard";
 import { ShortlistDrawer } from "./ShortlistDrawer";
+import { TurnstileWidget } from "./Turnstile";
 import { readShortlist, writeShortlist } from "../lib/shortlist";
 import { slugifyName } from "../lib/slug";
-import type {
-  DomainResult,
-  DomainStatus,
-  Filters,
-  GeneratedName,
-  NameCandidate,
-  ShortlistItem,
-  Tld,
+import {
+  DEFAULT_TLDS,
+  type DomainResult,
+  type DomainStatus,
+  type Filters,
+  type GeneratedName,
+  type NameCandidate,
+  type ShortlistItem,
+  type Tld,
 } from "../lib/types";
 
 const MAX_CHARS = 300;
 
 const DEFAULT_FILTERS: Filters = {
-  tlds: [".com"],
   style: "any",
   syllables: "any",
 };
@@ -42,6 +43,17 @@ export default function NameAuraApp() {
   const [shortlist, setShortlist] = useState<ShortlistItem[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
+  // Turnstile token — null until CF issues one (or if captcha is disabled in dev).
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const turnstileConfigured =
+    !!process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
+  // Honeypot field — bots fill it; humans don't see it.
+  const honeypotRef = useRef<HTMLInputElement | null>(null);
+
+  const handleTurnstileToken = useCallback((token: string | null) => {
+    setTurnstileToken(token);
+  }, []);
+
   // Hydrate shortlist from localStorage
   useEffect(() => {
     setShortlist(readShortlist());
@@ -60,7 +72,7 @@ export default function NameAuraApp() {
   const canSubmit = concept.trim().length > 0 && !loading;
 
   const checkDomainsFor = useCallback(
-    async (nameId: string, rawName: string, tlds: Tld[]) => {
+    async (nameId: string, rawName: string, tlds: readonly Tld[]) => {
       const slug = slugifyName(rawName);
       if (!slug) {
         setCandidates((prev) =>
@@ -68,7 +80,10 @@ export default function NameAuraApp() {
             c.id === nameId
               ? {
                   ...c,
-                  domains: tlds.map((t) => ({ tld: t, status: "error" as DomainStatus })),
+                  domains: tlds.map((t) => ({
+                    tld: t,
+                    status: "error" as DomainStatus,
+                  })),
                 }
               : c
           )
@@ -76,44 +91,45 @@ export default function NameAuraApp() {
         return;
       }
 
-      await Promise.all(
-        tlds.map(async (tld) => {
-          try {
-            const res = await fetch("/api/check-domain", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name: slug, tld }),
-            });
-            const json = (await res.json()) as { status?: DomainStatus };
-            const status: DomainStatus = json.status ?? "error";
-            setCandidates((prev) =>
-              prev.map((c) =>
-                c.id === nameId
-                  ? {
-                      ...c,
-                      domains: c.domains.map((d) =>
-                        d.tld === tld ? { ...d, status } : d
-                      ),
-                    }
-                  : c
-              )
-            );
-          } catch {
-            setCandidates((prev) =>
-              prev.map((c) =>
-                c.id === nameId
-                  ? {
-                      ...c,
-                      domains: c.domains.map((d) =>
-                        d.tld === tld ? { ...d, status: "error" as DomainStatus } : d
-                      ),
-                    }
-                  : c
-              )
-            );
-          }
-        })
-      );
+      try {
+        const res = await fetch("/api/check-domain", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: slug, tlds }),
+        });
+        const json = (await res.json()) as {
+          results?: Array<{ tld: Tld; status: DomainStatus }>;
+        };
+        const results = Array.isArray(json.results) ? json.results : [];
+        setCandidates((prev) =>
+          prev.map((c) => {
+            if (c.id !== nameId) return c;
+            const byTld = new Map<Tld, DomainStatus>();
+            for (const r of results) byTld.set(r.tld, r.status);
+            return {
+              ...c,
+              domains: c.domains.map((d) => ({
+                ...d,
+                status: byTld.get(d.tld) ?? "error",
+              })),
+            };
+          })
+        );
+      } catch {
+        setCandidates((prev) =>
+          prev.map((c) =>
+            c.id === nameId
+              ? {
+                  ...c,
+                  domains: c.domains.map((d) => ({
+                    ...d,
+                    status: "error" as DomainStatus,
+                  })),
+                }
+              : c
+          )
+        );
+      }
     },
     []
   );
@@ -125,11 +141,33 @@ export default function NameAuraApp() {
     setCandidates([]);
 
     try {
+      // If captcha is configured but we don't have a token yet, bail out
+      // politely. The widget will usually have resolved by the time the
+      // user clicks Generate, but network hiccups happen.
+      if (turnstileConfigured && !turnstileToken) {
+        setLoading(false);
+        setError(
+          "Still verifying you're human — please wait a moment and try again."
+        );
+        return;
+      }
+
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ concept: concept.trim(), filters }),
+        body: JSON.stringify({
+          concept: concept.trim(),
+          filters,
+          turnstileToken,
+          website: honeypotRef.current?.value || "",
+        }),
       });
+
+      // Silent honeypot 204 — legitimate users never see this.
+      if (res.status === 204) {
+        setLoading(false);
+        return;
+      }
 
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
@@ -145,7 +183,7 @@ export default function NameAuraApp() {
         id: makeId(),
         name: n.name,
         rationale: n.rationale,
-        domains: filters.tlds.map<DomainResult>((t) => ({
+        domains: DEFAULT_TLDS.map<DomainResult>((t) => ({
           tld: t,
           status: "checking",
         })),
@@ -157,7 +195,7 @@ export default function NameAuraApp() {
       // Kick off domain checks after loading flips off so the cards render first.
       for (const c of fresh) {
         // Don't await — run in parallel across names.
-        void checkDomainsFor(c.id, c.name, filters.tlds);
+        void checkDomainsFor(c.id, c.name, DEFAULT_TLDS);
       }
     } catch (e) {
       setLoading(false);
@@ -237,6 +275,35 @@ export default function NameAuraApp() {
               onToggle={() => setFiltersOpen((o) => !o)}
             />
           </div>
+
+          {/* Honeypot: invisible to humans, irresistible to naive bots.
+              Positioned off-screen + aria-hidden + autocomplete off. */}
+          <div
+            aria-hidden="true"
+            style={{
+              position: "absolute",
+              left: "-10000px",
+              top: "auto",
+              width: "1px",
+              height: "1px",
+              overflow: "hidden",
+            }}
+          >
+            <label htmlFor="website">
+              Website (leave blank)
+              <input
+                ref={honeypotRef}
+                id="website"
+                name="website"
+                type="text"
+                tabIndex={-1}
+                autoComplete="off"
+                defaultValue=""
+              />
+            </label>
+          </div>
+
+          <TurnstileWidget onToken={handleTurnstileToken} />
 
           <div className="mt-4">
             <Button

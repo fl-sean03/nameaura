@@ -45,12 +45,90 @@ Open http://localhost:3000.
 
 ### Environment variables
 
-| Variable            | Purpose                                          |
-|---------------------|--------------------------------------------------|
-| `ANTHROPIC_API_KEY` | Server-side Claude API key for `/api/generate`   |
+| Variable                          | Required? | Purpose                                                                 |
+|-----------------------------------|-----------|-------------------------------------------------------------------------|
+| `ANTHROPIC_API_KEY`               | **yes**   | Server-side Claude API key for `/api/generate`                          |
+| `NEXT_PUBLIC_TURNSTILE_SITE_KEY`  | prod      | Cloudflare Turnstile site key (browser-safe)                            |
+| `TURNSTILE_SECRET_KEY`            | prod      | Cloudflare Turnstile secret key (server-only)                           |
+| `UPSTASH_REDIS_REST_URL`          | prod      | Upstash Redis REST URL for rate limiting + daily budget                 |
+| `UPSTASH_REDIS_REST_TOKEN`        | prod      | Upstash Redis REST token                                                |
+| `DAILY_GENERATION_LIMIT`          | no        | Global daily cap on `/api/generate` successes (UTC day). Default `200`. |
+| `IP_HASH_SALT`                    | no        | Salt mixed into IP hashes in abuse logs                                 |
 
-The key is only read in the route handler (server-side), so it never ships to
-the browser.
+Only `NEXT_PUBLIC_TURNSTILE_SITE_KEY` is exposed to the browser. Every other
+key is read server-side in the route handler.
+
+#### Getting a Turnstile key pair (free)
+
+1. Sign in at [dash.cloudflare.com](https://dash.cloudflare.com) (free account).
+2. Left sidebar → **Turnstile** → **Add site**.
+3. Domain: `nameaura.co` (add `www.nameaura.co` and any Vercel preview
+   hostnames you care about as well — `*.vercel.app` is not accepted, add
+   specific subdomains).
+4. Widget mode: **Invisible** (so legit users never see it).
+5. Copy the **Site Key** → `NEXT_PUBLIC_TURNSTILE_SITE_KEY`.
+6. Copy the **Secret Key** → `TURNSTILE_SECRET_KEY`.
+
+If both are empty the captcha layer is skipped and a warning is logged —
+useful for local dev.
+
+#### Provisioning Upstash Redis (free tier)
+
+1. Sign up at [console.upstash.com](https://console.upstash.com) (GitHub
+   login works).
+2. **Create Database** → Redis → pick a region near your Vercel region
+   (`iad1`/`us-east-1` for US, `fra1`/`eu-west-1` for EU).
+3. Free tier gives 10k commands/day which is plenty for rate-limit
+   counters.
+4. On the database page, open the **REST** tab.
+5. Copy **UPSTASH_REDIS_REST_URL** and **UPSTASH_REDIS_REST_TOKEN** into
+   your env.
+
+If both are empty the app falls back to an in-memory limiter. This is
+fine for `npm run dev` but **not durable** on Vercel serverless — each
+cold start resets the counter, so an attacker who hits several regions
+can bypass limits.
+
+## Security posture
+
+`/api/generate` (the only expensive endpoint) is protected by eight
+independent layers, all enforced server-side. Any one of them is enough
+to reject a hostile request:
+
+1. **Origin / CORS check** — only requests from `nameaura.co`,
+   `www.nameaura.co`, `nameaura.vercel.app`, preview
+   `nameaura-*.vercel.app`, or `localhost:3000` are accepted. Everything
+   else is `403`.
+2. **Content-Type + body-size gate** — must be `application/json` and
+   ≤ 10 KB. Prevents multipart abuse and giant payloads.
+3. **Strict schema validation** — concept must be 1–300 chars, TLDs must
+   be in `.com .co .io .ai`, style and syllables must match allowed
+   enums. Prompt-injection markers (`<|im_start|>`, `ignore previous
+   instructions`, `[[[`, `### system:`, jailbreak keywords, etc.) are
+   blocked outright. Token-repetition floods are rejected.
+4. **Honeypot field** — a hidden `website` input is rendered off-screen.
+   Humans never see it; naive bots auto-fill it. Non-empty ⇒ silent
+   `204`. No feedback for the bot.
+5. **Per-IP rate limit** — 5 generate requests per 10-minute sliding
+   window, 60 check-domain requests per minute, returned with a
+   `Retry-After` header. Backed by Upstash Redis; in-memory fallback in
+   dev.
+6. **Cloudflare Turnstile** — invisible captcha. Frontend obtains a
+   short-lived token; backend verifies it with CF before calling
+   Anthropic.
+7. **Global daily budget** — a Redis counter keyed by UTC day caps
+   successful generations at `DAILY_GENERATION_LIMIT` (default 200).
+   Exceeded ⇒ `503` with `Retry-After: 3600`. Tune via env var.
+8. **Cost-guard Anthropic wrapper** — `max_tokens: 1500`,
+   `temperature: 0.7`, and any model response above 3 KB is rejected as
+   anomalous before being returned to the client. Upstream errors never
+   leak their details; the client just sees "service temporarily
+   unavailable".
+
+Abuse events (`400`, `403`, `429`, oversized responses, upstream
+errors) are logged to `stderr` as single-line JSON with `kind: "abuse"`,
+a sha256-hashed IP (salted — not reversible), the route, status, and
+reason. Vercel captures this in the function logs — no third-party SDK.
 
 ## API
 
@@ -106,7 +184,8 @@ Response:
 - The Claude prompt asks for strictly JSON. If the model adds prose around the
   JSON, the route handler attempts a second-pass `{...}` extraction. If that
   still fails it returns a 502 with the raw text for debugging.
-- Claude calls are not cached or rate-limited. For production you want both.
+- Claude calls are rate-limited per IP and globally budgeted (see
+  "Security posture" above). Responses are not cached.
 - Shortlist is stored only in the user's browser; clearing site data wipes it.
 
 ## Scripts

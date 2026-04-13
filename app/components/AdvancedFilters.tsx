@@ -1,9 +1,7 @@
 "use client";
 
 import { ChevronDown, SlidersHorizontal } from "lucide-react";
-import type { Filters, NameStyle, SyllableCount, Tld } from "../lib/types";
-
-const ALL_TLDS: Tld[] = [".com", ".co", ".io", ".ai"];
+import type { Filters, NameStyle, SyllableCount } from "../lib/types";
 
 interface Props {
   value: Filters;
@@ -13,13 +11,6 @@ interface Props {
 }
 
 export function AdvancedFilters({ value, onChange, open, onToggle }: Props) {
-  function toggleTld(t: Tld) {
-    const next = value.tlds.includes(t)
-      ? value.tlds.filter((x) => x !== t)
-      : [...value.tlds, t];
-    onChange({ ...value, tlds: next.length ? next : [".com"] });
-  }
-
   return (
     <div className="rounded-xl border border-gray-200 bg-white">
       <button
@@ -40,32 +31,6 @@ export function AdvancedFilters({ value, onChange, open, onToggle }: Props) {
 
       {open && (
         <div className="space-y-4 border-t border-gray-100 px-4 py-4">
-          <div>
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wide text-gray-500">
-              Preferred TLDs
-            </label>
-            <div className="flex flex-wrap gap-2">
-              {ALL_TLDS.map((t) => {
-                const active = value.tlds.includes(t);
-                return (
-                  <button
-                    key={t}
-                    type="button"
-                    onClick={() => toggleTld(t)}
-                    className={[
-                      "rounded-full border px-3 py-1 text-sm transition-colors",
-                      active
-                        ? "border-blue-500 bg-blue-50 text-blue-700"
-                        : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50",
-                    ].join(" ")}
-                  >
-                    {t}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-gray-500">
@@ -104,6 +69,9 @@ export function AdvancedFilters({ value, onChange, open, onToggle }: Props) {
               </select>
             </div>
           </div>
+          <p className="text-xs text-gray-500">
+            Every name is checked against <strong>.com .ai .io .co .xyz .app</strong>.
+          </p>
         </div>
       )}
     </div>
