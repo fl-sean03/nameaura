@@ -15,8 +15,8 @@ available domain links straight to the Namecheap checkout.
 - Next.js 16 (App Router, TypeScript, Turbopack)
 - Tailwind CSS v4
 - [`lucide-react`](https://lucide.dev) icons
-- [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript)
-  (Claude Sonnet 4.5)
+- [Vercel AI SDK](https://sdk.vercel.ai) (`ai` + `@ai-sdk/anthropic`) calling
+  Claude Sonnet 4.5 via `generateObject` with a Zod schema
 - [Namecheap domains API](https://www.namecheap.com/support/api/methods/domains/check/)
   for real availability checks, parsed with `fast-xml-parser`
 - DNS fallback (`dns.promises.resolve4`) when Namecheap creds aren't set
@@ -165,11 +165,13 @@ to reject a hostile request:
 7. **Global daily budget** — a Redis counter keyed by UTC day caps
    successful generations at `DAILY_GENERATION_LIMIT` (default 200).
    Exceeded ⇒ `503` with `Retry-After: 3600`. Tune via env var.
-8. **Cost-guard Anthropic wrapper** — `max_tokens: 1500`,
-   `temperature: 0.7`, and any model response above 3 KB is rejected as
-   anomalous before being returned to the client. Upstream errors never
-   leak their details; the client just sees "service temporarily
-   unavailable".
+8. **Cost-guard AI SDK wrapper** — `maxOutputTokens: 1500`,
+   `temperature: 0.7`, and a Zod schema passed to
+   `generateObject` bounds the response shape (5–12 names, each with a
+   2–40 char name and 5–200 char rationale). The schema is enforced by
+   the provider as a tool call, so the model can't return prose or
+   oversized output. Upstream errors never leak their details; the
+   client just sees "service temporarily unavailable".
 
 Abuse events (`400`, `403`, `429`, oversized responses, upstream
 errors) are logged to `stderr` as single-line JSON with `kind: "abuse"`,
@@ -234,6 +236,18 @@ Response:
 TLDs into a single Namecheap request and caches each domain in-memory for 60
 seconds so shortlist re-renders don't hammer the upstream.
 
+## AI SDK
+
+`/api/generate` uses the [Vercel AI SDK](https://sdk.vercel.ai)
+(`ai` + `@ai-sdk/anthropic`) and calls `generateObject` with a Zod
+schema so Claude returns a structured payload directly — no manual JSON
+parsing, no regex fallback. The schema caps the array length and each
+field's size, which doubles as a cost guard on the model output.
+
+`ANTHROPIC_API_KEY` is the only model-side env var; the AI SDK's
+Anthropic provider picks it up from the environment automatically and
+nothing client-side ever sees it.
+
 ## Caveats
 
 - **With `NAMECHEAP_*` set, availability is a real registration check.**
@@ -241,10 +255,13 @@ seconds so shortlist re-renders don't hammer the upstream.
   reports registered-but-parked domains as available. See
   [Getting Namecheap API access](#getting-namecheap-api-access) for the
   production story and the Vercel egress caveat.
-- The Claude prompt asks for strictly JSON. If the model adds prose around the
-  JSON, the route handler attempts a second-pass `{...}` extraction.
+- The Claude response is shape-enforced by the Vercel AI SDK's
+  `generateObject` + Zod — the provider returns a tool-call that matches
+  the schema or the call fails, so there's no prose / markdown / JSON
+  parsing to worry about.
 - Claude calls are rate-limited per IP and globally budgeted (see
-  "Security posture" above). Claude output is size-capped as a cost-guard.
+  "Security posture" above). The response shape itself is bounded by
+  the schema, so a runaway model can't blow the cost budget.
 - Shortlist is stored only in the user's browser; clearing site data wipes it.
 - Namecheap availability reflects registration status but does not tell you
   whether the owner is willing to sell.
