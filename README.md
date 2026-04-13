@@ -6,8 +6,9 @@
 > whatever the original was — only the look, feel, and stated purpose do.
 
 AI-powered brand name ideation for new ventures. Describe your concept, pick a
-few preferences, and get 10 brandable name candidates back with rationale and a
-heuristic domain-availability signal for common TLDs.
+few preferences, and get up to 12 brandable name candidates back with rationale.
+Every name is checked against six TLDs (`.com .ai .io .co .xyz .app`) and each
+available domain links straight to the Namecheap checkout.
 
 ## Stack
 
@@ -16,17 +17,23 @@ heuristic domain-availability signal for common TLDs.
 - [`lucide-react`](https://lucide.dev) icons
 - [`@anthropic-ai/sdk`](https://github.com/anthropics/anthropic-sdk-typescript)
   (Claude Sonnet 4.5)
-- Node's built-in `dns.promises.resolve4()` for the availability heuristic
+- [Namecheap domains API](https://www.namecheap.com/support/api/methods/domains/check/)
+  for real availability checks, parsed with `fast-xml-parser`
+- DNS fallback (`dns.promises.resolve4`) when Namecheap creds aren't set
 - No database, no auth — shortlist is saved to `localStorage`
 
 ## Features
 
 - Single-page app with a clean, light gradient aesthetic
 - Textarea for a business concept (up to 300 chars)
-- "Advanced Filters" (TLD multi-select, name style, syllable count)
-- `POST /api/generate` — asks Claude for 10 candidate names + rationales (JSON)
-- `POST /api/check-domain` — DNS lookup per name/TLD pair, returns
-  `available` / `taken` / `error`
+- **Advanced Filters**: name style (one-word / two-word / portmanteau / any)
+  and syllable count. TLDs are fixed defaults and not user-selectable.
+- `POST /api/generate` — asks Claude for up to 12 candidate names + rationales
+- `POST /api/check-domain` — batched Namecheap lookup for all six TLDs at once,
+  with a 60s per-domain in-memory cache
+- Results render as **one card per name** with six colored availability pills
+  (green = available, red = taken, gray spinning = checking, yellow = error).
+  Click a green pill to jump to Namecheap's add-to-cart URL.
 - "My Shortlist" side drawer persisted in `localStorage`
 - Skeleton loading state while generating
 
@@ -48,6 +55,10 @@ Open http://localhost:3000.
 | Variable                          | Required? | Purpose                                                                 |
 |-----------------------------------|-----------|-------------------------------------------------------------------------|
 | `ANTHROPIC_API_KEY`               | **yes**   | Server-side Claude API key for `/api/generate`                          |
+| `NAMECHEAP_API_USER`              | prod      | Namecheap API username (usually same as account login)                  |
+| `NAMECHEAP_API_KEY`               | prod      | Namecheap API key                                                       |
+| `NAMECHEAP_USERNAME`              | prod      | Namecheap account username                                              |
+| `NAMECHEAP_CLIENT_IP`             | prod      | Outbound IP the API call comes from (must match whitelist in Namecheap) |
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY`  | prod      | Cloudflare Turnstile site key (browser-safe)                            |
 | `TURNSTILE_SECRET_KEY`            | prod      | Cloudflare Turnstile secret key (server-only)                           |
 | `UPSTASH_REDIS_REST_URL`          | prod      | Upstash Redis REST URL for rate limiting + daily budget                 |
@@ -57,6 +68,39 @@ Open http://localhost:3000.
 
 Only `NEXT_PUBLIC_TURNSTILE_SITE_KEY` is exposed to the browser. Every other
 key is read server-side in the route handler.
+
+#### Getting Namecheap API access
+
+The availability check uses Namecheap's
+[`namecheap.domains.check`](https://www.namecheap.com/support/api/methods/domains/check/)
+endpoint. To use it:
+
+1. Be a Namecheap customer (any active account).
+2. Enable API access at
+   [https://ap.www.namecheap.com/settings/tools/apiaccess/](https://ap.www.namecheap.com/settings/tools/apiaccess/).
+3. Grab your `ApiUser` and `ApiKey` from that page.
+4. **Whitelist the IP your server calls from.** Namecheap rejects any request
+   whose source IP isn't in its whitelist.
+5. Set `NAMECHEAP_API_USER`, `NAMECHEAP_API_KEY`, `NAMECHEAP_USERNAME`, and
+   `NAMECHEAP_CLIENT_IP` (same IP you just whitelisted).
+
+**The Vercel egress gotcha.** On Vercel's serverless runtime your outbound IP
+is not fixed — it rotates across a large pool. Namecheap only authorizes by
+IP, so production has three realistic options:
+
+- **Accept flakiness.** The route logs a warning and falls back to the DNS
+  heuristic when Namecheap rejects the call. Not great UX.
+- **Route egress through a static-IP proxy** (QuotaGuard Static, Fixie, or a
+  self-hosted proxy on a fixed-IP VPS). Set `NAMECHEAP_CLIENT_IP` to that
+  proxy's IP. This is the clean production answer.
+- **Deploy on a runtime with stable egress** (Fly.io, Railway, a plain VM).
+  Static egress is the default there.
+
+If any of the four `NAMECHEAP_*` env vars are missing, `/api/check-domain`
+logs a one-time warning and falls back to a DNS `A`-record heuristic. The
+heuristic is **wrong on parked domains** — a registered but unconfigured
+domain with no `A` record is reported as available. It's fine for local dev,
+not for production.
 
 #### Getting a Turnstile key pair (free)
 
@@ -101,11 +145,13 @@ to reject a hostile request:
    else is `403`.
 2. **Content-Type + body-size gate** — must be `application/json` and
    ≤ 10 KB. Prevents multipart abuse and giant payloads.
-3. **Strict schema validation** — concept must be 1–300 chars, TLDs must
-   be in `.com .co .io .ai`, style and syllables must match allowed
-   enums. Prompt-injection markers (`<|im_start|>`, `ignore previous
-   instructions`, `[[[`, `### system:`, jailbreak keywords, etc.) are
-   blocked outright. Token-repetition floods are rejected.
+3. **Strict schema validation** — concept must be 1–300 chars, style and
+   syllables must match allowed enums. Prompt-injection markers
+   (`<|im_start|>`, `ignore previous instructions`, `[[[`, `### system:`,
+   jailbreak keywords, etc.) are blocked outright. Token-repetition
+   floods are rejected. (TLDs are no longer part of the request — the
+   client always checks the fixed default set against
+   `/api/check-domain`.)
 4. **Honeypot field** — a hidden `website` input is rendered off-screen.
    Humans never see it; naive bots auto-fill it. Non-empty ⇒ silent
    `204`. No feedback for the bot.
@@ -140,10 +186,11 @@ Request body:
 {
   "concept": "A cozy bookstore cafe with locally roasted coffee.",
   "filters": {
-    "tlds": [".com", ".co"],
     "style": "one-word",
     "syllables": "short"
-  }
+  },
+  "turnstileToken": "<cf-turnstile-token-or-null>",
+  "website": ""
 }
 ```
 
@@ -157,36 +204,50 @@ Response:
 }
 ```
 
+TLDs are **no longer part of the request** — every name is always checked
+against the full default set client-side via `/api/check-domain`.
+
 Errors return `{ "error": "..." }` with a non-200 status.
 
 ### `POST /api/check-domain`
 
 ```json
-{ "name": "pagebrew", "tld": ".com" }
+{ "name": "pagebrew", "tlds": [".com", ".ai", ".io", ".co", ".xyz", ".app"] }
 ```
 
 Response:
 
 ```json
-{ "domain": "pagebrew.com", "status": "available" }
+{
+  "results": [
+    { "tld": ".com", "status": "available" },
+    { "tld": ".ai",  "status": "taken" },
+    { "tld": ".io",  "status": "available" },
+    { "tld": ".co",  "status": "available" },
+    { "tld": ".xyz", "status": "available" },
+    { "tld": ".app", "status": "available" }
+  ]
+}
 ```
 
-`status` is one of `available | taken | error`.
+`status` is one of `available | taken | error`. The endpoint batches all six
+TLDs into a single Namecheap request and caches each domain in-memory for 60
+seconds so shortlist re-renders don't hammer the upstream.
 
 ## Caveats
 
-- **The domain availability check is a heuristic, not a registration check.**
-  It does a DNS `A` record lookup. A registered-but-parked domain with no
-  `A` record will be reported as **available** here when in fact it is
-  **taken**. For ground truth you want a WHOIS/RDAP lookup or a registrar API
-  (Namecheap, GoDaddy, Porkbun). **TODO**: swap in RDAP via
-  `https://rdap.iana.org/`.
+- **With `NAMECHEAP_*` set, availability is a real registration check.**
+  Without them the route falls back to a DNS `A`-record heuristic that mis-
+  reports registered-but-parked domains as available. See
+  [Getting Namecheap API access](#getting-namecheap-api-access) for the
+  production story and the Vercel egress caveat.
 - The Claude prompt asks for strictly JSON. If the model adds prose around the
-  JSON, the route handler attempts a second-pass `{...}` extraction. If that
-  still fails it returns a 502 with the raw text for debugging.
+  JSON, the route handler attempts a second-pass `{...}` extraction.
 - Claude calls are rate-limited per IP and globally budgeted (see
-  "Security posture" above). Responses are not cached.
+  "Security posture" above). Claude output is size-capped as a cost-guard.
 - Shortlist is stored only in the user's browser; clearing site data wipes it.
+- Namecheap availability reflects registration status but does not tell you
+  whether the owner is willing to sell.
 
 ## Scripts
 
